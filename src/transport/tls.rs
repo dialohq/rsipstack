@@ -35,6 +35,9 @@ pub struct TlsConfig {
     pub tls12_only: bool,
     // When true, disable post-quantum key exchange (X25519MLKEM768) to reduce Client Hello size.
     pub disable_post_quantum: bool,
+    // When true, use native-tls (OpenSSL) backend instead of rustls for legacy cipher suite support.
+    #[cfg(feature = "native-tls")]
+    pub use_native_tls: bool,
 }
 
 fn parse_private_key(key_data: &[u8]) -> Result<pki_types::PrivateKeyDer<'static>> {
@@ -99,61 +102,128 @@ impl TlsListenerConnection {
         transport_layer_inner: TransportLayerInnerRef,
     ) -> Result<()> {
         let listener = TcpListener::bind(self.inner.local_addr.get_socketaddr()?).await?;
-        let acceptor = Self::create_acceptor(&self.inner.config).await?;
 
-        tokio::spawn(async move {
-            loop {
-                let (stream, remote_addr) = match listener.accept().await {
-                    Ok((stream, remote_addr)) => (stream, remote_addr),
-                    Err(e) => {
-                        warn!(error = ?e, "Failed to accept TLS connection");
-                        continue;
-                    }
-                };
-                if !transport_layer_inner.is_whitelisted(remote_addr.ip()).await {
-                    debug!(remote = %remote_addr, "tls connection rejected by whitelist");
-                    continue;
-                }
+        #[cfg(feature = "native-tls")]
+        let use_native = self.inner.config.use_native_tls;
+        #[cfg(not(feature = "native-tls"))]
+        let use_native = false;
 
-                let acceptor_clone = acceptor.clone();
-                let transport_layer_inner_ref = transport_layer_inner.clone();
-
+        if use_native {
+            #[cfg(feature = "native-tls")]
+            {
+                let acceptor = Self::create_native_acceptor(&self.inner.config)?;
                 tokio::spawn(async move {
-                    // Perform TLS handshake
-                    let tls_stream = match acceptor_clone.accept(stream).await {
-                        Ok(stream) => stream,
-                        Err(e) => {
-                            warn!(error = %e, "TLS handshake failed");
-                            return;
+                    loop {
+                        let (stream, remote_addr) = match listener.accept().await {
+                            Ok((stream, remote_addr)) => (stream, remote_addr),
+                            Err(e) => {
+                                warn!(error = ?e, "Failed to accept TLS connection");
+                                continue;
+                            }
+                        };
+                        if !transport_layer_inner.is_whitelisted(remote_addr.ip()).await {
+                            debug!(remote = %remote_addr, "tls connection rejected by whitelist");
+                            continue;
                         }
-                    };
 
-                    // Create remote SIP address
-                    let remote_sip_addr = SipAddr {
-                        r#type: Some(rsip::transport::Transport::Tls),
-                        addr: remote_addr.into(),
-                    };
-                    // Create TLS connection
-                    let tls_connection = match TlsConnection::from_server_stream(
-                        tls_stream,
-                        remote_sip_addr.clone(),
-                        Some(transport_layer_inner_ref.cancel_token.child_token()),
-                    )
-                    .await
-                    {
-                        Ok(conn) => conn,
-                        Err(e) => {
-                            warn!(error = ?e, %remote_sip_addr, "Failed to create TLS connection");
-                            return;
-                        }
-                    };
+                        let acceptor_clone = acceptor.clone();
+                        let transport_layer_inner_ref = transport_layer_inner.clone();
 
-                    let sip_connection = SipConnection::Tls(tls_connection.clone());
-                    transport_layer_inner_ref.add_connection(sip_connection.clone());
-                    debug!(?remote_sip_addr, "new tls connection");
+                        tokio::spawn(async move {
+                            let tls_stream = match acceptor_clone.accept(stream).await {
+                                Ok(stream) => stream,
+                                Err(e) => {
+                                    warn!(error = %e, "Native TLS handshake failed");
+                                    return;
+                                }
+                            };
+
+                            let remote_sip_addr = SipAddr {
+                                r#type: Some(rsip::transport::Transport::Tls),
+                                addr: remote_addr.into(),
+                            };
+
+                            let tls_connection =
+                                match TlsConnection::from_native_server_stream(
+                                    tls_stream,
+                                    remote_sip_addr.clone(),
+                                    Some(
+                                        transport_layer_inner_ref.cancel_token.child_token(),
+                                    ),
+                                )
+                                .await
+                                {
+                                    Ok(conn) => conn,
+                                    Err(e) => {
+                                        warn!(error = ?e, %remote_sip_addr, "Failed to create native TLS connection");
+                                        return;
+                                    }
+                                };
+
+                            let sip_connection = SipConnection::Tls(tls_connection.clone());
+                            transport_layer_inner_ref.add_connection(sip_connection.clone());
+                            debug!(?remote_sip_addr, "new native tls connection");
+                        });
+                    }
                 });
             }
-        });
+        } else {
+            let acceptor = Self::create_acceptor(&self.inner.config).await?;
+
+            tokio::spawn(async move {
+                loop {
+                    let (stream, remote_addr) = match listener.accept().await {
+                        Ok((stream, remote_addr)) => (stream, remote_addr),
+                        Err(e) => {
+                            warn!(error = ?e, "Failed to accept TLS connection");
+                            continue;
+                        }
+                    };
+                    if !transport_layer_inner.is_whitelisted(remote_addr.ip()).await {
+                        debug!(remote = %remote_addr, "tls connection rejected by whitelist");
+                        continue;
+                    }
+
+                    let acceptor_clone = acceptor.clone();
+                    let transport_layer_inner_ref = transport_layer_inner.clone();
+
+                    tokio::spawn(async move {
+                        // Perform TLS handshake
+                        let tls_stream = match acceptor_clone.accept(stream).await {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                warn!(error = %e, "TLS handshake failed");
+                                return;
+                            }
+                        };
+
+                        // Create remote SIP address
+                        let remote_sip_addr = SipAddr {
+                            r#type: Some(rsip::transport::Transport::Tls),
+                            addr: remote_addr.into(),
+                        };
+                        // Create TLS connection
+                        let tls_connection = match TlsConnection::from_server_stream(
+                            tls_stream,
+                            remote_sip_addr.clone(),
+                            Some(transport_layer_inner_ref.cancel_token.child_token()),
+                        )
+                        .await
+                        {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                warn!(error = ?e, %remote_sip_addr, "Failed to create TLS connection");
+                                return;
+                            }
+                        };
+
+                        let sip_connection = SipConnection::Tls(tls_connection.clone());
+                        transport_layer_inner_ref.add_connection(sip_connection.clone());
+                        debug!(?remote_sip_addr, "new tls connection");
+                    });
+                }
+            });
+        }
         Ok(())
     }
 
@@ -167,6 +237,34 @@ impl TlsListenerConnection {
 
     pub async fn close(&self) -> Result<()> {
         Ok(())
+    }
+
+    #[cfg(feature = "native-tls")]
+    fn create_native_acceptor(
+        config: &TlsConfig,
+    ) -> Result<tokio_native_tls::TlsAcceptor> {
+        let (cert_data, key_data) = match (&config.cert, &config.key) {
+            (Some(cert), Some(key)) => (cert, key),
+            _ => {
+                return Err(Error::Error(
+                    "Server certificate and key required for native TLS acceptor".to_string(),
+                ))
+            }
+        };
+
+        let identity = native_tls::Identity::from_pkcs8(cert_data, key_data)
+            .map_err(|e| Error::Error(format!("Failed to create server identity: {}", e)))?;
+
+        let mut builder = native_tls::TlsAcceptor::builder(identity);
+        builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
+        if config.tls12_only {
+            builder.max_protocol_version(Some(native_tls::Protocol::Tlsv12));
+        }
+
+        let acceptor = builder
+            .build()
+            .map_err(|e| Error::Error(format!("Failed to build native TLS acceptor: {}", e)))?;
+        Ok(tokio_native_tls::TlsAcceptor::from(acceptor))
     }
 
     async fn create_acceptor(config: &TlsConfig) -> Result<TlsAcceptor> {
@@ -216,6 +314,9 @@ impl fmt::Debug for TlsListenerConnection {
 type TlsClientStream = tokio_rustls::client::TlsStream<TcpStream>;
 type TlsServerStream = tokio_rustls::server::TlsStream<TcpStream>;
 
+#[cfg(feature = "native-tls")]
+type NativeTlsStream = tokio_native_tls::TlsStream<TcpStream>;
+
 // TLS connection - uses enum to handle both client and server streams
 #[derive(Clone)]
 pub struct TlsConnection {
@@ -241,6 +342,24 @@ enum TlsConnectionInner {
             >,
         >,
     ),
+    #[cfg(feature = "native-tls")]
+    NativeClient(
+        Arc<
+            StreamConnectionInner<
+                tokio::io::ReadHalf<NativeTlsStream>,
+                tokio::io::WriteHalf<NativeTlsStream>,
+            >,
+        >,
+    ),
+    #[cfg(feature = "native-tls")]
+    NativeServer(
+        Arc<
+            StreamConnectionInner<
+                tokio::io::ReadHalf<NativeTlsStream>,
+                tokio::io::WriteHalf<NativeTlsStream>,
+            >,
+        >,
+    ),
 }
 
 impl TlsConnection {
@@ -251,6 +370,11 @@ impl TlsConnection {
         custom_verifier: Option<Arc<dyn ServerCertVerifier>>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<Self> {
+        #[cfg(feature = "native-tls")]
+        if tls_config.map_or(false, |c| c.use_native_tls) {
+            return Self::connect_native_tls(remote_addr, tls_config, cancel_token).await;
+        }
+
         let mut root_store = RootCertStore::empty();
 
         // Load CA certificates if provided
@@ -454,6 +578,128 @@ impl TlsConnection {
     pub fn cancel_token(&self) -> Option<CancellationToken> {
         self.cancel_token.clone()
     }
+
+    #[cfg(feature = "native-tls")]
+    async fn connect_native_tls(
+        remote_addr: &SipAddr,
+        tls_config: Option<&TlsConfig>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<Self> {
+        let mut builder = native_tls::TlsConnector::builder();
+
+        // Load CA certificates if provided
+        if let Some(ca_data) = tls_config.and_then(|c| c.ca_certs.as_ref()) {
+            let cert = native_tls::Certificate::from_pem(ca_data)
+                .map_err(|e| Error::Error(format!("Failed to parse CA certificate: {}", e)))?;
+            builder.add_root_certificate(cert);
+        }
+
+        // Load client certificate and key for mutual TLS
+        if let (Some(cert_data), Some(key_data)) = (
+            tls_config.and_then(|c| c.client_cert.as_ref()),
+            tls_config.and_then(|c| c.client_key.as_ref()),
+        ) {
+            let identity = native_tls::Identity::from_pkcs8(cert_data, key_data)
+                .map_err(|e| Error::Error(format!("Failed to create identity: {}", e)))?;
+            builder.identity(identity);
+        }
+
+        // Set protocol versions
+        let tls12_only = tls_config.map_or(false, |c| c.tls12_only);
+        builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
+        if tls12_only {
+            builder.max_protocol_version(Some(native_tls::Protocol::Tlsv12));
+        }
+
+        let connector = builder
+            .build()
+            .map_err(|e| Error::Error(format!("Failed to build native TLS connector: {}", e)))?;
+        let connector = tokio_native_tls::TlsConnector::from(connector);
+
+        // Determine SNI hostname
+        let sni_hostname = tls_config
+            .and_then(|c| c.sni_hostname.clone())
+            .or_else(|| match &remote_addr.addr.host {
+                rsip::host_with_port::Host::Domain(domain) => Some(domain.to_string()),
+                _ => None,
+            });
+
+        let socket_addr = match &remote_addr.addr.host {
+            rsip::host_with_port::Host::Domain(domain) => {
+                let port = remote_addr.addr.port.as_ref().map_or(5061, |p| *p.value());
+                format!("{}:{}", domain, port).parse()?
+            }
+            rsip::host_with_port::Host::IpAddr(ip) => {
+                let port = remote_addr.addr.port.as_ref().map_or(5061, |p| *p.value());
+                SocketAddr::new(*ip, port)
+            }
+        };
+
+        let domain_string = sni_hostname.unwrap_or_else(|| match &remote_addr.addr.host {
+            rsip::host_with_port::Host::Domain(domain) => domain.to_string(),
+            rsip::host_with_port::Host::IpAddr(ip) => ip.to_string(),
+        });
+
+        let stream = TcpStream::connect(socket_addr).await?;
+        let local_addr = SipAddr {
+            r#type: Some(rsip::transport::Transport::Tls),
+            addr: stream.local_addr()?.into(),
+        };
+
+        let tls_stream = connector
+            .connect(&domain_string, stream)
+            .await
+            .map_err(|e| Error::Error(format!("Native TLS handshake failed: {}", e)))?;
+        let (read_half, write_half) = tokio::io::split(tls_stream);
+
+        let connection = Self {
+            inner: TlsConnectionInner::NativeClient(Arc::new(StreamConnectionInner::new(
+                local_addr.clone(),
+                remote_addr.clone(),
+                read_half,
+                write_half,
+            ))),
+            cancel_token,
+        };
+        debug!(
+            "Created native TLS client connection: {} -> {}",
+            local_addr, remote_addr
+        );
+
+        Ok(connection)
+    }
+
+    #[cfg(feature = "native-tls")]
+    pub async fn from_native_server_stream(
+        stream: NativeTlsStream,
+        remote_addr: SipAddr,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<Self> {
+        let local_addr = SipAddr {
+            r#type: Some(rsip::transport::Transport::Tls),
+            addr: stream.get_ref().get_ref().get_ref().local_addr()?.into(),
+        };
+
+        let (read_half, write_half) = tokio::io::split(stream);
+
+        let connection = Self {
+            inner: TlsConnectionInner::NativeServer(Arc::new(StreamConnectionInner::new(
+                local_addr,
+                remote_addr.clone(),
+                read_half,
+                write_half,
+            ))),
+            cancel_token,
+        };
+
+        debug!(
+            "Created native TLS server connection: {} <- {}",
+            connection.get_addr(),
+            remote_addr
+        );
+
+        Ok(connection)
+    }
 }
 
 // Implement StreamConnection trait for TlsConnection
@@ -463,6 +709,10 @@ impl StreamConnection for TlsConnection {
         match &self.inner {
             TlsConnectionInner::Client(inner) => &inner.remote_addr,
             TlsConnectionInner::Server(inner) => &inner.remote_addr,
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeClient(inner) => &inner.remote_addr,
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeServer(inner) => &inner.remote_addr,
         }
     }
 
@@ -470,6 +720,10 @@ impl StreamConnection for TlsConnection {
         match &self.inner {
             TlsConnectionInner::Client(inner) => inner.send_message(msg).await,
             TlsConnectionInner::Server(inner) => inner.send_message(msg).await,
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeClient(inner) => inner.send_message(msg).await,
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeServer(inner) => inner.send_message(msg).await,
         }
     }
 
@@ -477,6 +731,10 @@ impl StreamConnection for TlsConnection {
         match &self.inner {
             TlsConnectionInner::Client(inner) => inner.send_raw(data).await,
             TlsConnectionInner::Server(inner) => inner.send_raw(data).await,
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeClient(inner) => inner.send_raw(data).await,
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeServer(inner) => inner.send_raw(data).await,
         }
     }
 
@@ -485,6 +743,14 @@ impl StreamConnection for TlsConnection {
         match &self.inner {
             TlsConnectionInner::Client(inner) => inner.serve_loop(sender, sip_connection).await,
             TlsConnectionInner::Server(inner) => inner.serve_loop(sender, sip_connection).await,
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeClient(inner) => {
+                inner.serve_loop(sender, sip_connection).await
+            }
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeServer(inner) => {
+                inner.serve_loop(sender, sip_connection).await
+            }
         }
     }
 
@@ -492,6 +758,10 @@ impl StreamConnection for TlsConnection {
         match &self.inner {
             TlsConnectionInner::Client(inner) => inner.close().await,
             TlsConnectionInner::Server(inner) => inner.close().await,
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeClient(inner) => inner.close().await,
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeServer(inner) => inner.close().await,
         }
     }
 }
@@ -504,6 +774,22 @@ impl fmt::Display for TlsConnection {
             }
             TlsConnectionInner::Server(inner) => {
                 write!(f, "TLS {} -> {}", inner.local_addr, inner.remote_addr)
+            }
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeClient(inner) => {
+                write!(
+                    f,
+                    "TLS(native) {} -> {}",
+                    inner.local_addr, inner.remote_addr
+                )
+            }
+            #[cfg(feature = "native-tls")]
+            TlsConnectionInner::NativeServer(inner) => {
+                write!(
+                    f,
+                    "TLS(native) {} -> {}",
+                    inner.local_addr, inner.remote_addr
+                )
             }
         }
     }
