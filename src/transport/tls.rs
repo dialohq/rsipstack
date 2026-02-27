@@ -31,6 +31,10 @@ pub struct TlsConfig {
     pub ca_certs: Option<Vec<u8>>,
     // SNI hostname for TLS client connections (overrides the hostname derived from the remote address)
     pub sni_hostname: Option<String>,
+    // When true, only offer TLS 1.2 (no TLS 1.3). Useful for older SIP equipment.
+    pub tls12_only: bool,
+    // When true, disable post-quantum key exchange (X25519MLKEM768) to reduce Client Hello size.
+    pub disable_post_quantum: bool,
 }
 
 fn parse_private_key(key_data: &[u8]) -> Result<pki_types::PrivateKeyDer<'static>> {
@@ -262,6 +266,35 @@ impl TlsConnection {
             }
         }
 
+        let disable_pq = tls_config.map_or(false, |c| c.disable_post_quantum);
+        let tls12_only = tls_config.map_or(false, |c| c.tls12_only);
+
+        // Build TLS config builder with optional version/group restrictions
+        let builder = if disable_pq || tls12_only {
+            let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+            if disable_pq {
+                provider.kx_groups.retain(|g| {
+                    matches!(
+                        g.name(),
+                        rustls::NamedGroup::X25519
+                            | rustls::NamedGroup::secp256r1
+                            | rustls::NamedGroup::secp384r1
+                            | rustls::NamedGroup::secp521r1
+                    )
+                });
+            }
+            let versions: &[&'static rustls::SupportedProtocolVersion] = if tls12_only {
+                &[&rustls::version::TLS12]
+            } else {
+                rustls::DEFAULT_VERSIONS
+            };
+            ClientConfig::builder_with_provider(Arc::new(provider))
+                .with_protocol_versions(versions)
+                .map_err(|e| Error::Error(format!("TLS configuration error: {}", e)))?
+        } else {
+            ClientConfig::builder()
+        };
+
         // Build client config with optional mutual TLS
         let mut client_config = match (
             tls_config.and_then(|c| c.client_cert.as_ref()),
@@ -275,14 +308,14 @@ impl TlsConnection {
                         Error::Error(format!("Failed to parse client certificate: {}", e))
                     })?;
                 let key = parse_private_key(key_data)?;
-                ClientConfig::builder()
+                builder
                     .with_root_certificates(root_store)
                     .with_client_auth_cert(certs, key)
                     .map_err(|e| {
                         Error::Error(format!("Client auth configuration error: {}", e))
                     })?
             }
-            _ => ClientConfig::builder()
+            _ => builder
                 .with_root_certificates(root_store)
                 .with_no_client_auth(),
         };
