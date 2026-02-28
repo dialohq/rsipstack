@@ -306,7 +306,22 @@ impl DialogLayer {
             .as_ref()
             .map(|id| rsip::headers::CallId::from(id.clone()));
 
-        let via = self.endpoint.get_via(None, None)?;
+        // Derive Via transport from callee URI: use TLS if sips: scheme or transport=tls param
+        let needs_tls = matches!(opt.callee.scheme, Some(rsip::Scheme::Sips))
+            || opt
+                .callee
+                .params
+                .iter()
+                .any(|p| matches!(p, rsip::Param::Transport(rsip::Transport::Tls)));
+        let via_addr = if needs_tls {
+            self.endpoint
+                .get_addrs()
+                .into_iter()
+                .find(|a| matches!(a.r#type, Some(rsip::transport::Transport::Tls)))
+        } else {
+            None
+        };
+        let via = self.endpoint.get_via(via_addr, None)?;
         let mut request = self.endpoint.make_request(
             rsip::Method::Invite,
             recipient,
