@@ -261,10 +261,21 @@ impl EndpointInner {
             }
         }
         // update route set from Record-Route header
+        // Each Record-Route header may contain multiple comma-separated URIs.
+        // We must expand them into individual Route headers before reversing,
+        // so that the reversal operates on individual URIs, not entire headers.
         let mut route_set = Vec::new();
         for header in resp.headers.iter() {
             if let Header::RecordRoute(record_route) = header {
-                route_set.push(Header::Route(Route::from(record_route.value())));
+                if let Ok(typed) = record_route.typed() {
+                    for uri_with_params in typed.uris() {
+                        route_set.push(Header::Route(Route::new(
+                            uri_with_params.to_string(),
+                        )));
+                    }
+                } else {
+                    route_set.push(Header::Route(Route::from(record_route.value())));
+                }
             }
         }
         route_set.reverse();

@@ -454,15 +454,15 @@ async fn test_route_set_updates_from_200_ok_response() -> crate::Result<()> {
     assert_eq!(
         routes,
         vec![
-            "<sip:edge2.example.net:5080;transport=tcp;lr>".to_string(),
-            "<sip:edge1.example.net:5070;transport=tcp;lr>".to_string(),
+            "<sip:edge2.example.net:5080;transport=TCP;lr>".to_string(),
+            "<sip:edge1.example.net:5070;transport=TCP;lr>".to_string(),
         ],
         "Route set must be reversed compared to the Record-Route header order",
     );
 
     let destination = destination_from_request(&bye_request)
         .expect("route-enabled request should resolve to a destination");
-    let expected_destination = Uri::try_from("sip:edge2.example.net:5080;transport=tcp;lr")?;
+    let expected_destination = Uri::try_from("sip:edge2.example.net:5080;transport=TCP;lr")?;
     assert_eq!(
         &*destination, &expected_destination,
         "First Route entry must determine the transport destination",

@@ -158,8 +158,8 @@ Content-Length: 0\r\n\r\n";
     assert_eq!(
         routes,
         vec![
-            "<sip:proxy2.example.com:5070;transport=tcp;lr>".to_string(),
-            "<sip:proxy1.example.com:5060;transport=tcp;lr>".to_string()
+            "<sip:proxy2.example.com:5070;transport=TCP;lr>".to_string(),
+            "<sip:proxy1.example.com:5060;transport=TCP;lr>".to_string()
         ],
         "ACK Route headers must follow the reversed Record-Route order"
     );
@@ -189,5 +189,45 @@ Content-Length: 0\r\n\r\n";
     let ack = endpoint.inner.make_ack(&response, request_uri)?;
     let expected_uri = Uri::try_from("sip:1.2.3.4:15060;transport=tcp")?;
     assert_eq!(ack.uri, expected_uri, "ACK must target the remote Contact");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_make_ack_reverses_comma_separated_record_route() -> Result<()> {
+    let endpoint = super::create_test_endpoint(None).await?;
+
+    // Single Record-Route header with two comma-separated URIs (r2=on double Record-Route)
+    let raw_response = "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP uac.example.com:5060;branch=z9hG4bK1\r\n\
+Record-Route: <sip:10.72.11.204:5062;r2=on;transport=tcp;lr>,<sip:18.197.177.95:5060;r2=on;transport=udp;lr>\r\n\
+From: <sip:alice@example.com>;tag=from-tag\r\n\
+To: <sip:bob@example.com>;tag=to-tag\r\n\
+Call-ID: callid@example.com\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:bob@10.72.225.183:6062;transport=tcp>\r\n\
+Content-Length: 0\r\n\r\n";
+
+    let response = Response::try_from(raw_response)?;
+    let request_uri = response.remote_uri(None)?;
+    let ack = endpoint.inner.make_ack(&response, request_uri)?;
+
+    let routes: Vec<String> = ack
+        .headers
+        .iter()
+        .filter_map(|header| match header {
+            Header::Route(route) => Some(route.value().to_string()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        routes,
+        vec![
+            "<sip:18.197.177.95:5060;r2=on;transport=UDP;lr>".to_string(),
+            "<sip:10.72.11.204:5062;r2=on;transport=TCP;lr>".to_string()
+        ],
+        "ACK Route headers must reverse individual URIs from comma-separated Record-Route"
+    );
+
     Ok(())
 }

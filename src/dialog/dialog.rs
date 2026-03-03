@@ -682,14 +682,21 @@ impl DialogInner {
             return;
         }
 
-        let mut new_route_set: Vec<Route> = resp
-            .headers()
-            .iter()
-            .filter_map(|header| match header {
-                Header::RecordRoute(rr) => Some(Route::from(rr.value())),
-                _ => None,
-            })
-            .collect();
+        // Each Record-Route header may contain multiple comma-separated URIs.
+        // We must expand them into individual Route entries before reversing,
+        // so that the reversal operates on individual URIs, not entire headers.
+        let mut new_route_set: Vec<Route> = Vec::new();
+        for header in resp.headers().iter() {
+            if let Header::RecordRoute(rr) = header {
+                if let Ok(typed) = rr.typed() {
+                    for uri_with_params in typed.uris() {
+                        new_route_set.push(Route::new(uri_with_params.to_string()));
+                    }
+                } else {
+                    new_route_set.push(Route::from(rr.value()));
+                }
+            }
+        }
 
         new_route_set.reverse();
         *self.route_set.lock().unwrap() = new_route_set;
