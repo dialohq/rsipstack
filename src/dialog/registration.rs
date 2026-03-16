@@ -439,9 +439,31 @@ impl Registration {
                             self.contact = None;
                         }
 
-                        if auth_sent {
+                        let mut stale = false;
+                        for header in resp.headers.iter() {
+                            match header {
+                                rsip::Header::WwwAuthenticate(www_auth)
+                                    if www_auth.typed()?.stale == Some("true".to_string()) =>
+                                {
+                                    stale = true;
+                                }
+
+                                rsip::Header::ProxyAuthenticate(proxy_auth)
+                                    if proxy_auth.typed()?.0.stale == Some("true".to_string()) =>
+                                {
+                                    stale = true;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        if auth_sent && !stale {
                             debug!(status = %resp.status_code, "received auth response after auth sent");
                             return Ok(resp);
+                        } else if auth_sent {
+                            debug!(
+                                "auth sent but received response with stale=true, retrying registration"
+                            );
                         }
 
                         if let Some(cred) = &self.credential {
