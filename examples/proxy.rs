@@ -281,7 +281,7 @@ async fn process_incoming_request(
                 };
                 // send to target
                 let mut ack_req = tx.original.clone();
-                let via = tx.endpoint_inner.get_via(None, None)?;
+                let via = tx.endpoint_inner.get_via(None, None, None)?;
                 ack_req.headers.push_front(via.into());
                 let key = TransactionKey::from_request(&ack_req, TransactionRole::Client)
                     .expect("client_transaction");
@@ -430,7 +430,7 @@ async fn handle_invite(state: AppState, mut tx: Transaction) -> Result<()> {
     };
 
     let mut inv_req = tx.original.clone();
-    let via = tx.endpoint_inner.get_via(None, None)?;
+    let via = tx.endpoint_inner.get_via(None, None, None)?;
     inv_req.headers.push_front(via.into());
     inv_req.headers.push_front(record_route.clone().into());
     let key = TransactionKey::from_request(&inv_req, TransactionRole::Client)
@@ -510,7 +510,7 @@ async fn handle_bye(state: AppState, mut tx: Transaction) -> Result<()> {
     };
 
     let mut inv_req = tx.original.clone();
-    let via = tx.endpoint_inner.get_via(None, None)?;
+    let via = tx.endpoint_inner.get_via(None, None, None)?;
     inv_req.headers.push_front(via.into());
 
     let key = TransactionKey::from_request(&inv_req, TransactionRole::Client)

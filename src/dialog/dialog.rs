@@ -796,7 +796,11 @@ impl DialogInner {
         headers: Option<Vec<rsip::Header>>,
         body: Option<Vec<u8>>,
     ) -> Result<rsip::Request> {
-        let via = self.endpoint_inner.get_via(addr, branch)?;
+        let via = self.endpoint_inner.get_via(
+            addr,
+            branch,
+            Some(vec![rsip::Param::Other("rport".into(), None)]),
+        )?;
         self.make_request_with_vias(method, cseq, vec![via], headers, body)
     }
 

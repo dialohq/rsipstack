@@ -44,7 +44,7 @@ impl EndpointInner {
     /// # use rsipstack::transaction::endpoint::EndpointInner;
     /// # async fn example(endpoint: &EndpointInner) -> rsipstack::Result<()> {
     /// // Create an INVITE request
-    /// let via = endpoint.get_via(None, None)?;
+    /// let via = endpoint.get_via(None, None, None)?;
     /// let from = rsip::typed::From {
     ///     display_name: None,
     ///     uri: rsip::Uri::try_from("sip:alice@example.com")?,
@@ -269,9 +269,7 @@ impl EndpointInner {
             if let Header::RecordRoute(record_route) = header {
                 if let Ok(typed) = record_route.typed() {
                     for uri_with_params in typed.uris() {
-                        route_set.push(Header::Route(Route::new(
-                            uri_with_params.to_string(),
-                        )));
+                        route_set.push(Header::Route(Route::new(uri_with_params.to_string())));
                     }
                 } else {
                     route_set.push(Header::Route(Route::from(record_route.value())));

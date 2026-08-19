@@ -529,6 +529,7 @@ impl EndpointInner {
         &self,
         addr: Option<crate::transport::SipAddr>,
         branch: Option<rsip::Param>,
+        extra_params: Option<Vec<rsip::Param>>,
     ) -> Result<rsip::typed::Via> {
         let first_addr = match addr {
             Some(addr) => addr,
@@ -540,14 +541,18 @@ impl EndpointInner {
                 .cloned()?,
         };
 
+        let mut params = vec![branch.unwrap_or_else(make_via_branch)];
+        if let Some(extra) = extra_params {
+            for param in extra {
+                params.push(param);
+            }
+        }
+
         let via = rsip::typed::Via {
             version: rsip::Version::V2,
             transport: first_addr.r#type.unwrap_or_default(),
             uri: first_addr.addr.into(),
-            params: vec![
-                branch.unwrap_or_else(make_via_branch),
-                rsip::Param::Other("rport".into(), None),
-            ],
+            params,
         };
         Ok(via)
     }

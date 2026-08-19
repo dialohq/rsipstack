@@ -139,6 +139,7 @@ pub struct InviteOption {
     pub headers: Option<Vec<rsip::Header>>,
     pub support_prack: bool,
     pub call_id: Option<String>,
+    pub rport: bool,
 }
 
 pub struct DialogGuard {
@@ -321,7 +322,12 @@ impl DialogLayer {
         } else {
             None
         };
-        let via = self.endpoint.get_via(via_addr, None)?;
+        let extra_params = if opt.rport {
+            Some(vec![rsip::Param::Other("rport".into(), None)])
+        } else {
+            None
+        };
+        let via = self.endpoint.get_via(via_addr, None, extra_params)?;
         let mut request = self.endpoint.make_request(
             rsip::Method::Invite,
             recipient,

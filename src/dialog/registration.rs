@@ -368,7 +368,11 @@ impl Registration {
         }
         .with_tag(make_tag());
 
-        let via = self.endpoint.get_via(None, None)?;
+        let via = self.endpoint.get_via(
+            None,
+            None,
+            Some(vec![rsip::Param::Other("rport".into(), None)]),
+        )?;
 
         // Contact address selection priority:
         // 1. Contact header from REGISTER response (highest priority)
