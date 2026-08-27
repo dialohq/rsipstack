@@ -11,6 +11,7 @@ use rsip::headers::ContentLength;
 use rsip::message::HasHeaders;
 use rsip::prelude::HeadersExt;
 use rsip::{Header, Method, Request, Response, SipMessage, StatusCode, StatusCodeKind};
+use std::io::ErrorKind;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, trace};
 
@@ -280,14 +281,13 @@ impl Transaction {
                 .transport_layer
                 .lookup(target_uri, Some(&self.key))
                 .await?;
-            // For UDP, we need to store the resolved destination address
             if !connection.is_reliable() {
                 self.destination.replace(resolved_addr);
             }
             self.connection.replace(connection);
         }
 
-        let connection = self.connection.as_ref().ok_or(Error::TransactionError(
+        let connection = self.connection.clone().ok_or(Error::TransactionError(
             "no connection found".to_string(),
             self.key.clone(),
         ))?;
@@ -303,7 +303,36 @@ impl Transaction {
             self.original.to_owned().into()
         };
 
-        connection.send(message, self.destination.as_ref()).await?;
+        if let Err(error) = connection
+            .send(message.clone(), self.destination.as_ref())
+            .await
+        {
+            if !should_reconnect(&connection, &error) {
+                return Err(error);
+            }
+
+            let target = self
+                .destination
+                .clone()
+                .unwrap_or_else(|| connection.get_addr().clone());
+            debug!(%target, %error, "reconnecting after transport write failure");
+            self.endpoint_inner
+                .transport_layer
+                .del_connection_if_same(&connection);
+
+            let (new_connection, resolved_addr) = self
+                .endpoint_inner
+                .transport_layer
+                .lookup(&target, Some(&self.key))
+                .await?;
+            if !new_connection.is_reliable() {
+                self.destination.replace(resolved_addr);
+            }
+            new_connection
+                .send(message, self.destination.as_ref())
+                .await?;
+            self.connection.replace(new_connection);
+        }
         self.transition(TransactionState::Calling).map(|_| ())
     }
 
@@ -567,6 +596,25 @@ impl Transaction {
     pub fn is_terminated(&self) -> bool {
         self.state == TransactionState::Terminated
     }
+}
+
+fn should_reconnect(connection: &SipConnection, error: &Error) -> bool {
+    if !matches!(connection, SipConnection::Tcp(_)) {
+        return false;
+    }
+
+    matches!(
+        error,
+        Error::IoError(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::BrokenPipe
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::NotConnected
+                    | ErrorKind::UnexpectedEof
+            )
+    )
 }
 
 impl Transaction {
