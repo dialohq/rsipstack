@@ -162,6 +162,15 @@ pub enum SipConnection {
 }
 
 impl SipConnection {
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        match (self, other) {
+            (SipConnection::Tcp(left), SipConnection::Tcp(right)) => {
+                std::sync::Arc::ptr_eq(&left.inner, &right.inner)
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_reliable(&self) -> bool {
         match self {
             SipConnection::Udp(_) => false,

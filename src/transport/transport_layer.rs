@@ -181,6 +181,10 @@ impl TransportLayer {
         self.inner.del_connection(addr)
     }
 
+    pub(crate) fn del_connection_if_same(&self, connection: &SipConnection) {
+        self.inner.del_connection_if_same(connection)
+    }
+
     pub async fn lookup(
         &self,
         target: &SipAddr,
@@ -307,6 +311,10 @@ impl TransportLayerInner {
                 warn!(error = ?e, %addr, "Failed to write connections");
             }
         }
+    }
+
+    pub(super) fn del_connection_if_same(&self, connection: &SipConnection) {
+        remove_connection_if_same(&self.connections, connection);
     }
 
     async fn lookup(
@@ -458,6 +466,7 @@ impl TransportLayerInner {
     pub fn serve_connection(&self, transport: SipConnection) {
         let sub_token = self.cancel_token.child_token();
         let sender_clone = self.transport_tx.clone();
+        let connections = self.connections.clone();
         tokio::spawn(async move {
             match sender_clone.send(TransportEvent::New(transport.clone())) {
                 Ok(()) => {}
@@ -475,10 +484,33 @@ impl TransportLayerInner {
             }
             info!(addr=%transport.get_addr(), "transport serve_loop exited");
             transport.close().await.ok();
+            remove_connection_if_same(&connections, &transport);
             sender_clone.send(TransportEvent::Closed(transport)).ok();
         });
     }
 }
+
+fn remove_connection_if_same(
+    connections: &RwLock<HashMap<SipAddr, SipConnection>>,
+    connection: &SipConnection,
+) {
+    let addr = connection.get_addr();
+    match connections.write() {
+        Ok(mut connections) => {
+            if connections
+                .get(addr)
+                .is_some_and(|cached| cached.same_connection(connection))
+            {
+                connections.remove(addr);
+                debug!(%addr, "removed closed connection");
+            }
+        }
+        Err(e) => {
+            warn!(error = ?e, %addr, "Failed to write connections");
+        }
+    }
+}
+
 impl Drop for TransportLayer {
     fn drop(&mut self) {
         self.inner.cancel_token.cancel();
@@ -487,11 +519,50 @@ impl Drop for TransportLayer {
 #[cfg(test)]
 mod tests {
     use crate::{
-        transport::{udp::UdpConnection, SipAddr},
+        transport::{tcp::TcpConnection, udp::UdpConnection, SipAddr, SipConnection},
         Result,
     };
     use rsip::{Host, Transport};
     use rsip_dns::{trust_dns_resolver::TokioAsyncResolver, ResolvableExt};
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn test_lookup_reconnects_after_tcp_connection_closes() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let target = SipAddr::new(Transport::Tcp, listener.local_addr()?.into());
+        let transport_layer = super::TransportLayer::new(CancellationToken::new());
+
+        let first = TcpConnection::connect(&target, None).await?;
+        let (first_peer, _) = listener.accept().await?;
+        let first = SipConnection::Tcp(first);
+        transport_layer.add_connection(first.clone());
+        drop(first_peer);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let cached = transport_layer
+                    .inner
+                    .connections
+                    .read()
+                    .map(|connections| connections.contains_key(&target))
+                    .unwrap_or(false);
+                if !cached {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| crate::Error::Error("closed TCP connection remained cached".to_string()))?;
+
+        let (second, _) = transport_layer.lookup(&target, None).await?;
+        let (_second_peer, _) = listener.accept().await?;
+
+        assert!(!first.same_connection(&second));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_lookup() -> Result<()> {
